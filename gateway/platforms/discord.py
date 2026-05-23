@@ -1618,6 +1618,49 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.error("[%s] Failed to edit Discord message %s: %s", self.name, message_id, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
+    async def rename_thread(
+        self,
+        thread_id: str,
+        name: str,
+        *,
+        only_if_bot_owned: bool = True,
+    ) -> bool:
+        """Rename a Discord thread.
+
+        ``only_if_bot_owned`` (default True) makes this a no-op for threads
+        the bot didn't create. This protects user-created threads from being
+        silently renamed when Hermes auto-titles a session.
+
+        Returns True on success, False on no-op or failure. Failures are
+        logged at debug level — caller treats this as best-effort.
+        """
+        if not self._client:
+            return False
+        try:
+            channel = self._client.get_channel(int(thread_id))
+            if channel is None:
+                channel = await self._client.fetch_channel(int(thread_id))
+            if not isinstance(channel, discord.Thread):
+                return False
+            if only_if_bot_owned:
+                bot_user = getattr(self._client, "user", None)
+                bot_user_id = getattr(bot_user, "id", None)
+                if bot_user_id is None or channel.owner_id != bot_user_id:
+                    return False
+            # Discord caps thread names at 100 chars.
+            clean = (name or "").strip()
+            if not clean:
+                return False
+            if len(clean) > 100:
+                clean = clean[:97] + "..."
+            if clean == channel.name:
+                return False
+            await channel.edit(name=clean)
+            return True
+        except Exception as e:  # pragma: no cover - defensive logging
+            logger.debug("[%s] Failed to rename Discord thread %s: %s", self.name, thread_id, e, exc_info=True)
+            return False
+
     async def _send_file_attachment(
         self,
         chat_id: str,
@@ -2968,6 +3011,11 @@ class DiscordAdapter(BasePlatformAdapter):
         @discord.app_commands.describe(name="Session title. Leave empty to show current.")
         async def slash_title(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/title {name}".strip())
+
+        @tree.command(name="rename", description="Rename the current thread (auto-generates a title if no name given)")
+        @discord.app_commands.describe(name="New thread name. Leave empty to auto-generate from the conversation.")
+        async def slash_rename(interaction: discord.Interaction, name: str = ""):
+            await self._run_simple_slash(interaction, f"/rename {name}".strip())
 
         @tree.command(name="resume", description="Resume a previously-named session")
         @discord.app_commands.describe(name="Session name to resume. Leave empty to list sessions.")

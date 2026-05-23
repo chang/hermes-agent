@@ -6627,6 +6627,9 @@ class GatewayRunner:
         if canonical == "title":
             return await self._handle_title_command(event)
 
+        if canonical == "rename":
+            return await self._handle_rename_command(event)
+
         if canonical == "resume":
             return await self._handle_resume_command(event)
 
@@ -11423,6 +11426,114 @@ class GatewayRunner:
 
         future.add_done_callback(_log_rename_failure)
 
+    # ── Discord auto-thread title rename ──────────────────────────────
+    #
+    # When Hermes auto-creates a thread on @mention (discord.auto_thread),
+    # the thread name comes from a truncated copy of the user's first
+    # message. After the first exchange completes, ``maybe_auto_title``
+    # already generates a short descriptive session title via the
+    # ``title_generation`` auxiliary task — we rename the bot-owned
+    # thread to that title so the sidebar shows a useful name instead
+    # of "fix the bug in oh wait actually...".
+    #
+    # Only bot-owned threads are renamed (rename_thread enforces this).
+    # Gated by ``discord.auto_rename_threads`` (default True).
+
+    def _is_discord_thread_lane(self, source: SessionSource) -> bool:
+        """True when ``source`` is a Discord thread eligible for auto-rename."""
+        if source.platform != Platform.DISCORD:
+            return False
+        if (source.chat_type or "") != "thread":
+            return False
+        if not source.thread_id and not source.chat_id:
+            return False
+        return True
+
+    def _sanitize_discord_thread_title(self, title: str) -> str:
+        """Return a Discord-safe thread name from a generated session title."""
+        cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not cleaned:
+            return "Hermes Chat"
+        # Discord thread names cap at 100 chars.
+        if len(cleaned) > 100:
+            cleaned = cleaned[:97].rstrip() + "..."
+        return cleaned
+
+    def _discord_auto_rename_threads_enabled(self) -> bool:
+        """Whether to auto-rename bot-owned Discord threads to the session title."""
+        try:
+            user_cfg = _load_gateway_config() or {}
+            discord_cfg = user_cfg.get("discord", {}) if isinstance(user_cfg, dict) else {}
+            if not isinstance(discord_cfg, dict):
+                return True
+            val = discord_cfg.get("auto_rename_threads", True)
+            return bool(val) if val is not None else True
+        except Exception:
+            return True
+
+    async def _rename_discord_thread_for_session_title(
+        self,
+        source: SessionSource,
+        session_id: str,
+        title: str,
+    ) -> None:
+        """Best-effort rename of a Discord thread when Hermes auto-titles a session."""
+        if not self._is_discord_thread_lane(source):
+            return
+        if not self._discord_auto_rename_threads_enabled():
+            return
+        adapter = self.adapters.get(source.platform) if getattr(self, "adapters", None) else None
+        if adapter is None:
+            return
+        rename_thread = getattr(adapter, "rename_thread", None)
+        if rename_thread is None:
+            return
+        # Discord puts the thread ID in chat_id (since the thread IS the
+        # channel for routing purposes). thread_id mirrors it.
+        thread_id = str(source.thread_id or source.chat_id or "")
+        if not thread_id:
+            return
+        thread_name = self._sanitize_discord_thread_title(title)
+        try:
+            await rename_thread(thread_id, thread_name, only_if_bot_owned=True)
+        except Exception:
+            logger.debug("Failed to rename Discord thread for auto-generated title", exc_info=True)
+
+    def _schedule_discord_thread_title_rename(
+        self,
+        source: SessionSource,
+        session_id: str,
+        title: str,
+    ) -> None:
+        """Schedule a Discord thread rename from the auto-title background thread."""
+        if not title or not self._is_discord_thread_lane(source):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(self, "_gateway_loop", None)
+        if loop is None or loop.is_closed():
+            return
+        try:
+            copied_source = dataclasses.replace(source)
+        except Exception:
+            copied_source = source
+        future = safe_schedule_threadsafe(
+            self._rename_discord_thread_for_session_title(copied_source, session_id, title),
+            loop,
+            logger=logger,
+            log_message="Discord thread title rename failed to schedule",
+        )
+        if future is None:
+            return
+        def _log_rename_failure(fut) -> None:
+            try:
+                fut.result()
+            except Exception:
+                logger.debug("Discord thread title rename failed", exc_info=True)
+
+        future.add_done_callback(_log_rename_failure)
+
     _TELEGRAM_CAPABILITY_HINT_COOLDOWN_S = 300.0
 
     def _should_send_telegram_capability_hint(self, source: SessionSource) -> bool:
@@ -11739,6 +11850,96 @@ class GatewayRunner:
                 return t("gateway.title.current_with_title", session_id=session_id, title=title)
             else:
                 return t("gateway.title.current_no_title", session_id=session_id)
+
+    async def _handle_rename_command(self, event: MessageEvent) -> str:
+        """Handle /rename command — rename the current Discord thread.
+
+        With no argument, auto-generates a descriptive title from the recent
+        transcript (uses the same ``title_generation`` auxiliary task that
+        powers auto-titling on the first exchange).
+
+        With an argument, uses that text directly as the new thread name.
+
+        Discord-only. Allows renaming user-owned threads too (slash command
+        is explicit user intent, unlike the silent auto-rename on first
+        exchange which is gated to bot-owned threads).
+        """
+        source = event.source
+        if source.platform != Platform.DISCORD:
+            return "ℹ️  /rename only works on Discord threads."
+        if (source.chat_type or "") != "thread":
+            return "ℹ️  /rename only works inside a Discord thread."
+
+        thread_id = str(source.thread_id or source.chat_id or "")
+        if not thread_id:
+            return "❌ Could not resolve thread ID."
+
+        adapter = self.adapters.get(Platform.DISCORD) if getattr(self, "adapters", None) else None
+        if adapter is None:
+            return "❌ Discord adapter is not connected."
+        rename_thread = getattr(adapter, "rename_thread", None)
+        if rename_thread is None:
+            return "❌ This Hermes build does not support thread renaming."
+
+        new_name_arg = event.get_command_args().strip()
+
+        if new_name_arg:
+            # Explicit name — use it verbatim (sanitization happens in adapter).
+            new_name = new_name_arg
+        else:
+            # No argument — generate a descriptive title from recent transcript.
+            session_entry = self.session_store.get_or_create_session(source)
+            session_id = session_entry.session_id
+            transcript = []
+            try:
+                transcript = self.session_store.load_transcript(session_id) or []
+            except Exception:
+                logger.debug("Failed to load transcript for /rename", exc_info=True)
+
+            # Pull the first user→assistant exchange. Fall back to most-recent
+            # exchange if the first is missing.
+            user_msg = ""
+            assistant_msg = ""
+            for m in transcript:
+                role = m.get("role")
+                content = m.get("content") or ""
+                if isinstance(content, list):  # multimodal content
+                    content = " ".join(
+                        c.get("text", "") for c in content if isinstance(c, dict)
+                    )
+                if not user_msg and role == "user":
+                    user_msg = str(content)
+                elif user_msg and not assistant_msg and role == "assistant":
+                    assistant_msg = str(content)
+                    break
+
+            if not user_msg:
+                return "❌ No conversation history yet — give me something to title."
+
+            try:
+                from agent.title_generator import generate_title
+                title = generate_title(
+                    user_msg,
+                    assistant_msg or "(no reply yet)",
+                )
+            except Exception as e:
+                logger.debug("Title generation in /rename failed", exc_info=True)
+                return f"❌ Title generation failed: {e}"
+
+            if not title:
+                return "❌ Title generation returned no title."
+            new_name = title
+
+        # Slash command = explicit user intent → rename even user-owned threads.
+        try:
+            ok = await rename_thread(thread_id, new_name, only_if_bot_owned=False)
+        except Exception as e:
+            logger.debug("Discord rename_thread raised", exc_info=True)
+            return f"❌ Rename failed: {e}"
+
+        if ok:
+            return f"✏️  Thread renamed to: **{new_name}**"
+        return "❌ Rename failed (Discord rejected the request — check bot permissions / name length)."
 
     async def _handle_resume_command(self, event: MessageEvent) -> str:
         """Handle /resume command — switch to a previously-named session."""
@@ -15856,6 +16057,12 @@ class GatewayRunner:
                     }
                     if self._is_telegram_topic_lane(source):
                         maybe_auto_title_kwargs["title_callback"] = lambda title: self._schedule_telegram_topic_title_rename(
+                            source,
+                            effective_session_id,
+                            title,
+                        )
+                    elif self._is_discord_thread_lane(source):
+                        maybe_auto_title_kwargs["title_callback"] = lambda title: self._schedule_discord_thread_title_rename(
                             source,
                             effective_session_id,
                             title,
