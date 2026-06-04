@@ -6214,6 +6214,13 @@ class GatewayRunner:
                             pass
                     # Check if the failure is non-retryable
                     elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
+                        # Release any resources the failed adapter allocated in
+                        # __init__/connect (e.g. APIServerAdapter opens a SQLite
+                        # ResponseStore connection in __init__, before connect()
+                        # can fail on a missing key). Without this, every
+                        # reconnect cycle leaks an fd and eventually exhausts the
+                        # process limit -> "[Errno 24] Too many open files".
+                        await self._safe_adapter_disconnect(adapter, platform)
                         self._update_platform_runtime_status(
                             platform.value,
                             platform_state="fatal",
@@ -6226,6 +6233,11 @@ class GatewayRunner:
                         )
                         del self._failed_platforms[platform]
                     else:
+                        # Same resource-release rationale as the non-retryable
+                        # branch above: a retryable failure still discards this
+                        # adapter instance and builds a fresh one next cycle, so
+                        # any fds/sessions it opened must be closed now.
+                        await self._safe_adapter_disconnect(adapter, platform)
                         self._update_platform_runtime_status(
                             platform.value,
                             platform_state="retrying",
@@ -6248,6 +6260,13 @@ class GatewayRunner:
                         # `not fatal_error_retryable` branch above, so anything
                         # reaching here is by definition retryable.
                 except Exception as e:
+                    # Defensive cleanup: an exception can be raised after the
+                    # adapter was built (and opened fds/sessions/SQLite
+                    # connections) but before it was registered in
+                    # self.adapters. Close it so reconnect churn can't leak fds.
+                    _failed_adapter = locals().get("adapter")
+                    if _failed_adapter is not None:
+                        await self._safe_adapter_disconnect(_failed_adapter, platform)
                     self._update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying",

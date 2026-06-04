@@ -4204,6 +4204,20 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._runner.cleanup()
             self._runner = None
         self._app = None
+        # Close the SQLite-backed ResponseStore connection. Without this the
+        # connection (plus its -wal fd) leaks on every reconnect cycle, because
+        # the reconnect path (gateway.run._reconnect) builds a *fresh*
+        # APIServerAdapter -> new ResponseStore() -> new sqlite3.connect() and
+        # the old adapter is only ever torn down via disconnect(). Under
+        # sustained reconnect churn (e.g. a flapping Slack socket cascading
+        # into gateway-wide reconnects) this exhausts the process FD limit and
+        # surfaces as "[Errno 24] Too many open files" on unrelated paths.
+        store = getattr(self, "_response_store", None)
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
         logger.info("[%s] API server stopped", self.name)
 
     async def send(
