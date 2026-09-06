@@ -1055,16 +1055,11 @@ const server = http.createServer(async (req, res) => {
         return badRequest(res, "format must be text or markdown");
       }
       const space = await resolveSpace(spaceId);
-      // iMessage renders markdown natively; spectrum-ts degrades it to
-      // readable plain text on platforms that don't.
-      // spectrumMarkdown() enables enableDataDetection in the underlying
-      // iMessage API, which can 500 on messages containing raw URLs.
-      // Plain-text URLs are auto-linked by iMessage, so route markdown
-      // messages that contain URLs through spectrumText while preserving
-      // spectrumMarkdown for URL-free markdown. The decision lives in
-      // send-format.mjs so tests can exercise it directly.
+      // Preserve native text/style rendering even when Markdown includes URLs.
+      // Spectrum renders links as label (URL); it does not need data detection
+      // enabled to send formatting ranges. Explicit plain text remains literal.
       const builder =
-        chooseSendFormat(format, text) === "markdown"
+        chooseSendFormat(format) === "markdown"
           ? spectrumMarkdown(text)
           : spectrumText(text);
       const result = await space.send(builder);

@@ -152,7 +152,9 @@ All env vars are documented in `plugin.yaml`. The most important:
   endpoint; a caption is delivered as a separate text bubble after the media.
 - **Markdown is rendered.** Replies go out via spectrum-ts' `markdown()`
   builder; iMessage renders bold/italics/lists/code natively and other
-  Spectrum platforms degrade to readable plain text. URL-only replies go out
+  Spectrum platforms degrade to readable plain text. Markdown containing
+  URLs keeps its native formatting; labeled links render as `label (URL)`,
+  not concealed hyperlinks. URL-only replies go out
   via spectrum-ts' `richlink()` builder so iMessage can render a native link
   preview card. `PHOTON_MARKDOWN=false` reverts to stripped plain text and
   disables rich-link routing.
