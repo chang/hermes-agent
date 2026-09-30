@@ -286,11 +286,13 @@ def _sdk_supports_agent_sessions() -> bool:
 
 
 def _session_status_method(client: Any):
-    """Return the status setter: Agent Sessions API when available, else legacy."""
-    if _sdk_supports_agent_sessions():
-        method = getattr(client, "agents_sessions_setStatus", None)
-        if method is not None:
-            return method
+    """Return the free-form typing status setter, including empty-string clear.
+
+    agents.sessions.setStatus is NOT wire-compatible: its status is a lifecycle
+    enum (active/processing/suspended/closed). Sending our status phrases or an
+    empty string there fails with invalid_arguments on newer Slack SDKs.
+    Keep typing on the text API; session title routing is independent.
+    """
     return client.assistant_threads_setStatus
 
 

@@ -5650,6 +5650,70 @@ class TestSlackAuthoredTextDeduplication:
         assert "Roll back" in payload
 
 
+class TestAgentSessionsApiRouting:
+    """Agent Sessions titles and free-form assistant typing are distinct APIs.
+
+    agents.sessions.setStatus accepts lifecycle enums, not arbitrary text or
+    the empty string used to clear typing. A newer SDK must not reroute typing.
+    """
+
+    def _adapter(self):
+        config = PlatformConfig(enabled=True, token="xoxb-fake-token")
+        a = SlackAdapter(config)
+        a._app = MagicMock()
+        a._app.client = AsyncMock()
+        return a
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [None, "is searching...", "is still working… (2m03s)"])
+    async def test_typing_keeps_freeform_api_with_new_sdk(self, status):
+        _slack_mod._AGENT_SESSIONS_SUPPORTED = True
+        a = self._adapter()
+        a._app.client.agents_sessions_setStatus = AsyncMock()
+        a._app.client.assistant_threads_setStatus = AsyncMock()
+        if status:
+            a.set_status_text("C123", status)
+        await a.send_typing("C123", metadata={"thread_id": "parent_ts"})
+        a._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="parent_ts",
+            status=status or "is thinking...",
+        )
+        a._app.client.agents_sessions_setStatus.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_typing_clears_freeform_status_with_new_sdk(self):
+        _slack_mod._AGENT_SESSIONS_SUPPORTED = True
+        a = self._adapter()
+        a._app.client.agents_sessions_setStatus = AsyncMock()
+        a._app.client.assistant_threads_setStatus = AsyncMock()
+        await a.send_typing("C123", metadata={"thread_id": "parent_ts"})
+        a._app.client.assistant_threads_setStatus.reset_mock()
+        await a.stop_typing("C123", metadata={"thread_id": "parent_ts"})
+        a._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="parent_ts",
+            status="",
+        )
+        a._app.client.agents_sessions_setStatus.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_thread_title_uses_agents_sessions_rename(self):
+        _slack_mod._AGENT_SESSIONS_SUPPORTED = True
+        a = self._adapter()
+        a.config.extra["assistant_thread_titles"] = True
+        a._app.client.agents_sessions_rename = AsyncMock()
+        a._app.client.assistant_threads_setTitle = AsyncMock()
+        await a._set_assistant_thread_title("D123", "171234.0001", "Summarize the incident")
+        a._app.client.agents_sessions_rename.assert_called_once_with(
+            channel_id="D123",
+            thread_ts="171234.0001",
+            title="Summarize the incident",
+        )
+        a._app.client.assistant_threads_setTitle.assert_not_called()
+
+
+
 # ---------------------------------------------------------------------------
 # TestNonConversationalSubtypeAllowlist
 # ---------------------------------------------------------------------------
