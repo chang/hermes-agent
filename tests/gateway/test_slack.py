@@ -5629,11 +5629,10 @@ class TestSlackAuthoredTextDeduplication:
 
 
 class TestAgentSessionsApiRouting:
-    """slack-sdk 3.44.0 Agent Sessions API (assistant_view deprecation Feb 2027).
+    """Agent Sessions titles and free-form assistant typing are distinct APIs.
 
-    When the installed slack-sdk ships agents.sessions.* typed methods, status
-    and title calls route through them; older SDKs keep using the legacy
-    assistant.threads.* methods (compat bridge on Slack's side).
+    agents.sessions.setStatus accepts lifecycle enums, not arbitrary text or
+    the empty string used to clear typing. A newer SDK must not reroute typing.
     """
 
     def _adapter(self):
@@ -5644,35 +5643,37 @@ class TestAgentSessionsApiRouting:
         return a
 
     @pytest.mark.asyncio
-    async def test_typing_uses_agent_sessions_when_supported(self):
+    @pytest.mark.parametrize("status", [None, "is searching...", "is still working… (2m03s)"])
+    async def test_typing_keeps_freeform_api_with_new_sdk(self, status):
         _slack_mod._AGENT_SESSIONS_SUPPORTED = True
         a = self._adapter()
         a._app.client.agents_sessions_setStatus = AsyncMock()
         a._app.client.assistant_threads_setStatus = AsyncMock()
+        if status:
+            a.set_status_text("C123", status)
         await a.send_typing("C123", metadata={"thread_id": "parent_ts"})
-        a._app.client.agents_sessions_setStatus.assert_called_once_with(
+        a._app.client.assistant_threads_setStatus.assert_called_once_with(
             channel_id="C123",
             thread_ts="parent_ts",
-            status="is thinking...",
+            status=status or "is thinking...",
         )
-        a._app.client.assistant_threads_setStatus.assert_not_called()
-
+        a._app.client.agents_sessions_setStatus.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_stop_typing_clears_via_agent_sessions(self):
+    async def test_stop_typing_clears_freeform_status_with_new_sdk(self):
         _slack_mod._AGENT_SESSIONS_SUPPORTED = True
         a = self._adapter()
         a._app.client.agents_sessions_setStatus = AsyncMock()
         a._app.client.assistant_threads_setStatus = AsyncMock()
         await a.send_typing("C123", metadata={"thread_id": "parent_ts"})
-        a._app.client.agents_sessions_setStatus.reset_mock()
+        a._app.client.assistant_threads_setStatus.reset_mock()
         await a.stop_typing("C123", metadata={"thread_id": "parent_ts"})
-        a._app.client.agents_sessions_setStatus.assert_called_once_with(
+        a._app.client.assistant_threads_setStatus.assert_called_once_with(
             channel_id="C123",
             thread_ts="parent_ts",
             status="",
         )
-        a._app.client.assistant_threads_setStatus.assert_not_called()
+        a._app.client.agents_sessions_setStatus.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_thread_title_uses_agents_sessions_rename(self):
