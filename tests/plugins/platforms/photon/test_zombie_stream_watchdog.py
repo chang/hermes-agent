@@ -61,7 +61,12 @@ def _run_staleness_harness(script: str) -> dict[str, Any]:
     assert run.returncode == 0, run.stderr
     return json.loads(run.stdout)
 
-def test_probe_message_id_is_guid_shaped_and_unique() -> None:
+def test_probe_message_id_is_resource_guid_shaped_and_unique() -> None:
+    """Photon Cloud requires the spc-msg- resource prefix, not a bare UUID.
+
+    A bare UUID fails with Expected message resource GUID and leaves every
+    watchdog probe inconclusive, even when the upstream channel is alive.
+    """
     out = _run_staleness_harness(
         """
         const first = createProbeMessageId();
@@ -69,7 +74,7 @@ def test_probe_message_id_is_guid_shaped_and_unique() -> None:
         process.stdout.write(JSON.stringify({ first, second }));
         """
     )
-    guid_re = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    guid_re = r"^spc-msg-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     assert re.fullmatch(guid_re, out["first"])
     assert re.fullmatch(guid_re, out["second"])
     assert out["first"] != out["second"]

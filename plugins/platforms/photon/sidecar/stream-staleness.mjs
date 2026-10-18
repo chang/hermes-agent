@@ -28,9 +28,12 @@ import { randomUUID } from "node:crypto";
 // gRPC NOT_FOUND is code 5; SDKs also surface it as "not found" / "NotFound"
 // message text. Anything not clearly not-found is inconclusive.
 const NOT_FOUND_RE = /not[\s_-]?found/i;
-/** Return a unique message id accepted by Spectrum's message-id parser. */
+/** Return a unique Photon Cloud message resource GUID for an uncached read. */
 export function createProbeMessageId() {
-  return randomUUID();
+  // Photon Cloud rejects bare Apple/UUID ids before looking up a message.
+  // Its opaque message resource namespace is spc-msg-<uuid>; using that
+  // namespace makes the missing-message lookup complete a real round-trip.
+  return `spc-msg-${randomUUID()}`;
 }
 
 /**
